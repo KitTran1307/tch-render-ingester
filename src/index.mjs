@@ -339,6 +339,35 @@ app.post("/run", express.json(), (req, res) => {
   return res.json({ ok: true, started: true });
 });
 
+// Full single-source debug: fetch → parse → push → report (auth required)
+app.get("/debug-source", async (req, res) => {
+  const auth = req.headers.authorization ?? "";
+  if (auth !== `Bearer ${CRON_SECRET}`) return res.status(401).json({ error: "unauthorized" });
+  const url = req.query.url;
+  const sourceId = req.query.sourceId ?? "debug";
+  const category = req.query.category ?? "commodities";
+  if (!url) return res.status(400).json({ error: "?url= required" });
+
+  const result = { url, fetchStatus: null, bodyLength: 0, itemsParsed: 0, pushResult: null, error: null };
+  try {
+    const r = await fetchRss(url);
+    if (!r) {
+      result.fetchStatus = "null (fetch returned null)";
+    } else {
+      result.bodyLength = r.length;
+      const items = parseRssItems(r, sourceId, category);
+      result.itemsParsed = items.length;
+      if (items.length > 0) {
+        result.pushResult = await pushItems(items.slice(0, 5));
+      }
+      result.fetchStatus = "ok";
+    }
+  } catch (err) {
+    result.error = err.message;
+  }
+  res.json(result);
+});
+
 app.get("/test-fetch", express.urlencoded({ extended: false }), async (req, res) => {
   const url = req.query.url;
   if (!url) return res.status(400).json({ error: "?url= required" });
