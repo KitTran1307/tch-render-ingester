@@ -48,6 +48,8 @@ const state = {
   lastStatus: null, // "ok" | "error" | "running"
   runCount: 0,
   running: false,
+  lastWatchdogAt: null,
+  lastWatchdogAction: null, // null | "triggered" | "skipped"
 };
 
 // ── HMAC + helpers ───────────────────────────────────────────────────────────
@@ -222,6 +224,53 @@ async function postHeartbeat(itemsIngested, status) {
   }
 }
 
+// ── CF tier-1 watchdog ───────────────────────────────────────────────────────
+// If CF hasn't posted a heartbeat in >30 min, Render triggers CF's ingest
+// endpoint directly so tier-1 sources stay fresh even when GH Actions is down.
+
+const CF_STALE_THRESHOLD_MS = 30 * 60 * 1000; // 30 minutes
+
+async function checkAndTriggerCfWatchdog() {
+  try {
+    const heartbeatUrl = `${BASE_URL}/api/internal/ingest-heartbeat?platform=cf`;
+    const res = await fetch(heartbeatUrl, {
+      headers: { Authorization: `Bearer ${CRON_SECRET}` },
+      signal: AbortSignal.timeout(10000),
+    });
+    if (!res.ok) {
+      console.warn(`[watchdog] heartbeat check returned ${res.status} — skipping`);
+      return;
+    }
+    const data = await res.json();
+    const lastSeenAt = data?.lastSeenAt ?? data?.last_seen_at ?? null;
+    const ageMs = lastSeenAt ? Date.now() - Date.parse(lastSeenAt) : Infinity;
+
+    state.lastWatchdogAt = new Date().toISOString();
+    if (ageMs < CF_STALE_THRESHOLD_MS) {
+      state.lastWatchdogAction = "skipped";
+      return;
+    }
+
+    console.warn(`[watchdog] CF tier-1 stale ${Math.round(ageMs / 60000)} min — triggering CF ingest`);
+    const body = JSON.stringify({ cronSchedule: "* * * * *", triggeredBy: "render-watchdog" });
+    const sig = signPayload(body);
+    const ingestRes = await fetch(`${BASE_URL}/api/internal/ingest`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${CRON_SECRET}`,
+        "X-Hub-Signature-256": sig,
+      },
+      body,
+      signal: AbortSignal.timeout(15000),
+    });
+    state.lastWatchdogAction = ingestRes.ok ? "triggered" : `trigger-failed-${ingestRes.status}`;
+    console.log(`[watchdog] CF ingest trigger: ${ingestRes.status}`);
+  } catch (err) {
+    console.warn(`[watchdog] error: ${err.message}`);
+  }
+}
+
 // ── Main ingestion run ───────────────────────────────────────────────────────
 
 async function runIngestion() {
@@ -321,6 +370,11 @@ app.get("/health", (_req, res) => {
     lastInserted: state.lastInserted,
     lastSkipped: state.lastSkipped,
     lastError: state.lastError,
+    watchdog: {
+      lastCheckedAt: state.lastWatchdogAt,
+      lastAction: state.lastWatchdogAction,
+      staleLimitMin: CF_STALE_THRESHOLD_MS / 60000,
+    },
   });
 });
 
@@ -421,6 +475,10 @@ app.listen(PORT, () => {
     console.error("[render-ingester] startup run failed:", err)
   );
   setInterval(() => {
+    // Check CF tier-1 freshness before each tier-3 run.
+    checkAndTriggerCfWatchdog().catch((err) =>
+      console.error("[render-ingester] watchdog failed:", err)
+    );
     runIngestion().catch((err) =>
       console.error("[render-ingester] scheduled run failed:", err)
     );
