@@ -27,11 +27,13 @@ if (!BASE_URL) fail("CF_PAGES_URL not set — aborting");
 if (!HMAC_SECRET) fail("INGEST_PUSH_HMAC_SECRET not set — aborting");
 if (!CRON_SECRET) fail("INTERNAL_CRON_SECRET not set — aborting");
 
-// User-Agent pool — rotated per-request to spread fingerprint across sources.
+// User-Agent pool — clean browser UAs without custom branding to avoid WAF blocks.
 const USER_AGENTS = [
-  "Mozilla/5.0 (compatible; TwoCentsHustler/1.0; +https://twocentshustler.me)",
-  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36 TwoCentsHustler/1.0",
-  "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36 TwoCentsHustler/1.0",
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+  "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0",
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_4_1) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4.1 Safari/605.1.15",
 ];
 
 // ── Module-level state for /health ───────────────────────────────────────────
@@ -84,10 +86,19 @@ async function fetchSources() {
 async function fetchRss(url) {
   try {
     const res = await fetch(url, {
-      headers: { "User-Agent": pickUserAgent() },
-      signal: AbortSignal.timeout(15000),
+      headers: {
+        "User-Agent": pickUserAgent(),
+        "Accept": "application/rss+xml, application/atom+xml, application/xml, text/xml, */*",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Cache-Control": "no-cache",
+      },
+      redirect: "follow",
+      signal: AbortSignal.timeout(20000),
     });
-    if (!res.ok) return null;
+    if (!res.ok) {
+      console.warn(`[render-ingester] ${res.status} from ${url}`);
+      return null;
+    }
     return res.text();
   } catch (err) {
     console.warn(`[render-ingester] Failed to fetch ${url}: ${err.message}`);
@@ -326,6 +337,26 @@ app.post("/run", express.json(), (req, res) => {
     console.error("[render-ingester] /run failed:", err)
   );
   return res.json({ ok: true, started: true });
+});
+
+app.get("/test-fetch", express.urlencoded({ extended: false }), async (req, res) => {
+  const url = req.query.url;
+  if (!url) return res.status(400).json({ error: "?url= required" });
+  try {
+    const r = await fetch(url, {
+      headers: {
+        "User-Agent": pickUserAgent(),
+        "Accept": "application/rss+xml, application/xml, text/xml, */*",
+        "Accept-Language": "en-US,en;q=0.9",
+      },
+      redirect: "follow",
+      signal: AbortSignal.timeout(10000),
+    });
+    const body = await r.text();
+    res.json({ status: r.status, ok: r.ok, bodyLength: body.length, bodyPreview: body.slice(0, 200) });
+  } catch (err) {
+    res.json({ error: err.message });
+  }
 });
 
 app.listen(PORT, () => {
