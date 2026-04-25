@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: tch-render-ingester
+    runtime: node
+    region: singapore
+    plan: free
+    buildCommand: cd services/render-ingester && npm ci
+    startCommand: cd services/render-ingester && npm start
+    rootDir: .
+    healthCheckPath: /health
+    envVars:
+      - key: CF_PAGES_URL
+        sync: false
+      - key: INGEST_PUSH_HMAC_SECRET
+        sync: false
+      - key: INTERNAL_CRON_SECRET
+        sync: false
+      - key: NODE_ENV
+        value: production
