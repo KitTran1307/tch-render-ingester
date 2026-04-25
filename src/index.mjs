@@ -340,6 +340,32 @@ app.post("/run", express.json(), (req, res) => {
 });
 
 // Full single-source debug: fetch → parse → push → report (auth required)
+// Scan all assigned sources (no jitter, no push) and report which ones return XML vs null
+app.get("/debug-run", async (req, res) => {
+  const auth = req.headers.authorization ?? "";
+  if (auth !== `Bearer ${CRON_SECRET}`) return res.status(401).json({ error: "unauthorized" });
+  const summary = { total: 0, ok: 0, null: 0, sources: [] };
+  try {
+    const sources = await fetchSources();
+    summary.total = sources.length;
+    for (const source of sources) {
+      try {
+        const xml = await fetchRss(source.url);
+        const result = { id: source.id, url: source.url.slice(0, 80), ok: !!xml, len: xml?.length ?? 0 };
+        if (xml) summary.ok++;
+        else summary.null++;
+        summary.sources.push(result);
+      } catch (err) {
+        summary.sources.push({ id: source.id, url: source.url.slice(0, 80), ok: false, error: err.message });
+        summary.null++;
+      }
+    }
+  } catch (err) {
+    return res.json({ error: err.message });
+  }
+  res.json(summary);
+});
+
 app.get("/debug-source", async (req, res) => {
   const auth = req.headers.authorization ?? "";
   if (auth !== `Bearer ${CRON_SECRET}`) return res.status(401).json({ error: "unauthorized" });
